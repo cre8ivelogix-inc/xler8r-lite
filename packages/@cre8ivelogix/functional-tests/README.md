@@ -9,7 +9,10 @@ The `cdk.json` file tells the CDK Toolkit how to execute your app. In our case t
 Goto directory @cre8ivelogix/functional-tests and execute the following command.
 
 To run the functional tests use the following command
-* `./functional-tests ACCOUNT_ID REGION DOMAIN_NAME`
+* `./functional-tests.sh ACCOUNT_ID REGION DOMAIN_NAME`
+  
+To tear down functional tests infrastructure
+* `./functional-tests-tear-down.sh ACCOUNT_ID REGION DOMAIN_NAME`
 
 where ACCOUNT_ID and the REGION is where you want to deploy the stack and should have credentials configured with 
 sufficient privileges. DOMAIN_NAME is the domain name for the website and should have a Route53 HostedZone configured 

@@ -14,8 +14,7 @@ export class FunctionalTestsStack extends cdk.Stack {
     super(scope, id, props);
 
     new X8Website(this, "TestWebSite", {
-      waDomainName: props.domainName,
-      waSiteSubDomain: `ft-${Math.random().toString(36).slice(2, 7)}`,
+      waDomainName: props.domainName
     });
   }
 }

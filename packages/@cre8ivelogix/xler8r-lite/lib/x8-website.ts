@@ -23,12 +23,16 @@ export interface X8WebSiteProps {
      * This property is used to provide the subdomain name where the website will be hosted.
      * @default www
      */
-    readonly waSiteSubDomain?: string;
+    readonly waSubDomain?: string;
     /**
      * This property is used to provide the site content.
      * @default build
      */
     readonly waPathToContent?: string;
+    /**
+     * Additional domain names to be included in ssl and redirect traffic to main domain
+     */
+    readonly waAdditionalDomainNames?: string[]
     /**
      * This property is used to provide custom root object for the cloudfront distribution.
      * @default index.html
@@ -63,13 +67,60 @@ export interface X8WebSiteProps {
     readonly waCloudFrontDistributionDefaultBehavior?: cloudfront.BehaviorOptions;
 }
 
+
 /**
- * X8Website can be used to build a well architected website hosted in S3 Bucket and with cloudfront as entry point.
- * This construct assumes that there is a hosted zone configured correctly in Route53 for the provided domain name.
+ * This construct can help build Well Architected infrastructure for website hosting in AWS using S3 Bucket
+ * It will create the following Well Architected resources using CRE8IVELOGIX
+ * Well Architected CDK Lite as part of the infrastructure
+ * 1. A validated public certificate for the website domain
+ * 2. An S3 Bucket using Well Architected Bucket construct
+ * 3. Creates and attaches the Bucket policies
+ * 4. A CloudFront distribution for bucket origin
+ * 7. A Route53 record to route traffic to CloudFront Distribution
+ * 8. Deploys the website content to the bucket
+ *
+ * ### Default Alarms
+ *
+ * @example Default Usage
+ * ```ts
+ * new X8Website(this, "LogicalId", {
+ *      waDomainName: 'cre8ivelogix.com',
+ *      waSubdomain: "www",
+ *      waPathToContent: './site-content'
+ * });
+ * ```
+ *
+ * @example Custom Configuration
+ * ```ts
+ * new X8Website(this, "LogicalId", {
+ *      waDomainName: 'cre8ivelogix.com',
+ *      waSubdomain: "www",
+ *      waPathToContent: './site-content',
+ *      waAdditionalDomainNames: ['www2.cre8ivelogix.com']
+ * });
+ * ```
+ *
+ * ### Compliance
+ * It addresses the following compliance requirements
+ * * Enable Origin Access Identity for Distributions with S3 Origin
+ * * Use CloudFront Content Distribution Network
+ * * Enable S3 Block Public Access for S3 Buckets
+ * * Enable S3 Bucket Keys
+ * * Secure Transport
+ * * Server Side Encryption
  */
 export class X8Website extends Construct {
+    /**
+     * CloudFront distribution used in this construct
+     */
     readonly cdn: Distribution;
+    /**
+     * Bucket hosting website content
+     */
     readonly websiteBucket: WaBucket;
+    /**
+     * Origin Access Identity
+     */
     readonly cloudfrontOAI: cloudfront.OriginAccessIdentity;
 
     constructor(scope: Construct, name: string, props: X8WebSiteProps) {
@@ -81,8 +132,7 @@ export class X8Website extends Construct {
             domainName: props.waDomainName
         });
 
-        const subDomain = props.waSiteSubDomain ?? "www"
-        const siteDomain = `${subDomain}.${props.waDomainName}`;
+        const wwwSiteDomain = this.getSiteDomain(props)
 
         this.cloudfrontOAI = props.waOriginAccessIdentity ?? new cloudfront.OriginAccessIdentity(
             this,
@@ -94,7 +144,7 @@ export class X8Website extends Construct {
 
         this.websiteBucket = new WaBucket(this, "WebsiteBucket", {
             ...props.waBucketProps,
-            bucketName: siteDomain
+            bucketName: wwwSiteDomain
         });
 
         const bucketPolicyActions = props.waBucketPolicyActions ?? []
@@ -113,14 +163,19 @@ export class X8Website extends Construct {
             })
         );
 
+        const certSans = this.getCertificateDomains(props);
+
         const certificate = new DnsValidatedCertificate(
             this,
             `${domainNameId}Cert`,
             {
-                domainName: siteDomain,
-                hostedZone: zone
+                domainName: wwwSiteDomain,
+                hostedZone: zone,
+                subjectAlternativeNames: certSans
             }
         );
+
+        const distributionDomainWithSans = this.getDistributionDomains(props)
 
         this.cdn = new Distribution(
             this,
@@ -129,7 +184,7 @@ export class X8Website extends Construct {
                 certificate: certificate,
                 enableLogging: props.waEnableCloudFrontLogging ?? false,
                 defaultRootObject: props.waDefaultRootObject ?? "index.html",
-                domainNames: [siteDomain],
+                domainNames: distributionDomainWithSans,
                 errorResponses: [
                     {
                         httpStatus: 403,
@@ -149,14 +204,6 @@ export class X8Website extends Construct {
             }
         );
 
-        new route53.ARecord(this, `${domainNameId}AliasRecord`, {
-            recordName: siteDomain,
-            target: route53.RecordTarget.fromAlias(
-                new targets.CloudFrontTarget(this.cdn)
-            ),
-            zone
-        });
-
         new s3deploy.BucketDeployment(this, "DeployWithInvalidation", {
             sources: [s3deploy.Source.asset(props.waPathToContent ?? "build")],
             destinationBucket: this.websiteBucket,
@@ -164,10 +211,34 @@ export class X8Website extends Construct {
             distributionPaths: ["/*"]
         });
 
+        const cfAliasRecord = new route53.ARecord(this, `${domainNameId}CfAliasRecord`, {
+            recordName: wwwSiteDomain,
+            target: route53.RecordTarget.fromAlias(
+                new targets.CloudFrontTarget(this.cdn)
+            ),
+            zone
+        });
+
+        certSans.map(certName => {
+            const nameToPascalCase = X8Website.domainNameToPascalCase(certName);
+
+            new route53.ARecord(this, `${nameToPascalCase}WwwAliasRecord`, {
+                recordName: certName,
+                target: route53.RecordTarget.fromAlias(
+                    new targets.Route53RecordTarget(cfAliasRecord)
+                ),
+                zone
+            });
+
+            new CfnOutput(this, `${nameToPascalCase}UrlOutput`, {
+                value: certName
+            });
+        })
+
         new CfnOutput(this, "Bucket", { value: this.websiteBucket.bucketName });
         new CfnOutput(this, "Certificate", { value: certificate.certificateArn });
         new CfnOutput(this, "DistributionId", {value: this.cdn.distributionId});
-        new CfnOutput(this, "WebsiteUrl", { value: "https://" + siteDomain });
+        new CfnOutput(this, "WebsiteUrl", { value: "https://" + wwwSiteDomain });
     }
 
     public static domainNameToPascalCase(domainName: string): string {
@@ -179,5 +250,35 @@ export class X8Website extends Construct {
         }
         return domain.replace("-", "")
             .slice(0, domain.lastIndexOf("Dot"));
+    }
+
+    getDistributionDomains(props: X8WebSiteProps): string[] {
+        return this.getCertificateDomains(props).concat([this.getSiteDomain(props)])
+    }
+
+    getSiteDomain(props: X8WebSiteProps): string {
+        const wwwSubDomain = "www";
+        if (props.waSubDomain && props.waSubDomain != wwwSubDomain) {
+            return `${wwwSubDomain}.${props.waSubDomain}.${props.waDomainName}`
+        } else {
+            return`${wwwSubDomain}.${props.waDomainName}`
+        }
+    }
+
+    getCertificateDomains(props: X8WebSiteProps): string[] {
+        const wwwSubDomain = "www";
+        let certificateDomains: string[] = []
+
+        if (props.waSubDomain && props.waSubDomain != wwwSubDomain) {
+            certificateDomains = certificateDomains.concat([`${props.waSubDomain}.${props.waDomainName}`])
+        } else {
+            certificateDomains = certificateDomains.concat( [props.waDomainName] )
+        }
+
+        if(props.waAdditionalDomainNames) {
+            certificateDomains = certificateDomains.concat(props.waAdditionalDomainNames)
+        }
+
+        return certificateDomains
     }
 }
